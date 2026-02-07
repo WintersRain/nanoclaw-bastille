@@ -1,8 +1,8 @@
 /**
  * Container Runner for NanoClaw
- * Spawns agent execution in Apple Container and handles IPC
+ * Spawns agent execution in a container (Docker or Apple Container) and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -17,6 +17,31 @@ import {
 import { logger } from './logger.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
+
+// Detect container runtime: prefer Apple Container, fall back to Docker
+function detectContainerRuntime(): string {
+  try {
+    execSync('which container', { stdio: 'ignore' });
+    return 'container';
+  } catch {
+    // Fall through
+  }
+  try {
+    execSync('which docker', { stdio: 'ignore' });
+    return 'docker';
+  } catch {
+    // Fall through
+  }
+  // Check OrbStack's default location
+  const orbDocker = path.join(os.homedir(), '.orbstack', 'bin', 'docker');
+  if (fs.existsSync(orbDocker)) {
+    return orbDocker;
+  }
+  throw new Error('No container runtime found. Install Docker (OrbStack) or Apple Container.');
+}
+
+const CONTAINER_RUNTIME = detectContainerRuntime();
+logger.info({ runtime: CONTAINER_RUNTIME }, 'Container runtime detected');
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -170,7 +195,7 @@ function buildVolumeMounts(
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
-  // Apple Container: --mount for readonly, -v for read-write
+  // --mount for readonly, -v for read-write (works with both Docker and Apple Container)
   for (const mount of mounts) {
     if (mount.readonly) {
       args.push(
@@ -229,7 +254,7 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn('container', containerArgs, {
+    const container = spawn(CONTAINER_RUNTIME, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -284,8 +309,8 @@ export async function runContainerAgent(
     const timeout = setTimeout(() => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      // Graceful stop: sends SIGTERM, waits, then SIGKILL — lets --rm fire
-      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+      // Graceful stop: sends SIGTERM, waits, then SIGKILL -- lets --rm fire
+      exec(`${CONTAINER_RUNTIME} stop ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');

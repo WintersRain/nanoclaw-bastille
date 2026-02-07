@@ -1,5 +1,6 @@
 import { exec, execSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import makeWASocket, {
@@ -852,48 +853,94 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
+function detectContainerRuntime(): string {
   try {
-    execSync('container system status', { stdio: 'pipe' });
-    logger.debug('Apple Container system already running');
+    execSync('which container', { stdio: 'pipe' });
+    return 'container';
   } catch {
-    logger.info('Starting Apple Container system...');
+    // Fall through
+  }
+  try {
+    execSync('which docker', { stdio: 'pipe' });
+    return 'docker';
+  } catch {
+    // Fall through
+  }
+  // Check OrbStack's default location
+  const orbDocker = path.join(os.homedir(), '.orbstack', 'bin', 'docker');
+  if (fs.existsSync(orbDocker)) {
+    return orbDocker;
+  }
+  return '';
+}
+
+function ensureContainerSystemRunning(): void {
+  const runtime = detectContainerRuntime();
+
+  if (!runtime) {
+    console.error(
+      '\n╔════════════════════════════════════════════════════════════════╗',
+    );
+    console.error(
+      '║  FATAL: No container runtime found                            ║',
+    );
+    console.error(
+      '║                                                                ║',
+    );
+    console.error(
+      '║  Install Docker (OrbStack) or Apple Container to run agents.  ║',
+    );
+    console.error(
+      '║  1. brew install --cask orbstack                              ║',
+    );
+    console.error(
+      '║  2. Open OrbStack and complete setup                          ║',
+    );
+    console.error(
+      '║  3. Restart NanoClaw                                          ║',
+    );
+    console.error(
+      '╚════════════════════════════════════════════════════════════════╝\n',
+    );
+    throw new Error('No container runtime found');
+  }
+
+  const runtimeName = runtime.includes('docker') ? 'Docker' : 'Apple Container';
+
+  if (runtime === 'container') {
+    // Apple Container needs explicit system start
     try {
-      execSync('container system start', { stdio: 'pipe', timeout: 30000 });
-      logger.info('Apple Container system started');
+      execSync('container system status', { stdio: 'pipe' });
+      logger.debug('Apple Container system already running');
+    } catch {
+      logger.info('Starting Apple Container system...');
+      try {
+        execSync('container system start', { stdio: 'pipe', timeout: 30000 });
+        logger.info('Apple Container system started');
+      } catch (err) {
+        logger.error({ err }, 'Failed to start Apple Container system');
+        throw new Error('Apple Container system is required but failed to start');
+      }
+    }
+  } else {
+    // Docker: verify daemon is running
+    try {
+      execSync(`${runtime} info`, { stdio: 'pipe', timeout: 10000 });
+      logger.debug(`${runtimeName} daemon is running`);
     } catch (err) {
-      logger.error({ err }, 'Failed to start Apple Container system');
-      console.error(
-        '\n╔════════════════════════════════════════════════════════════════╗',
-      );
-      console.error(
-        '║  FATAL: Apple Container system failed to start                 ║',
-      );
-      console.error(
-        '║                                                                ║',
-      );
-      console.error(
-        '║  Agents cannot run without Apple Container. To fix:           ║',
-      );
-      console.error(
-        '║  1. Install from: https://github.com/apple/container/releases ║',
-      );
-      console.error(
-        '║  2. Run: container system start                               ║',
-      );
-      console.error(
-        '║  3. Restart NanoClaw                                          ║',
-      );
-      console.error(
-        '╚════════════════════════════════════════════════════════════════╝\n',
-      );
-      throw new Error('Apple Container system is required but failed to start');
+      logger.error({ err }, `${runtimeName} daemon is not running`);
+      throw new Error(`${runtimeName} daemon is not running. Start OrbStack or Docker Desktop.`);
     }
   }
 
+  logger.info({ runtime: runtimeName }, 'Container runtime verified');
+
   // Clean up stopped NanoClaw containers from previous runs
   try {
-    const output = execSync('container ls -a --format {{.Names}}', {
+    const lsCmd = runtime === 'container'
+      ? 'container ls -a --format {{.Names}}'
+      : `${runtime} ps -a --format {{.Names}}`;
+    const output = execSync(lsCmd, {
       stdio: ['pipe', 'pipe', 'pipe'],
       encoding: 'utf-8',
     });
@@ -902,7 +949,7 @@ function ensureContainerSystemRunning(): void {
       .map((n) => n.trim())
       .filter((n) => n.startsWith('nanoclaw-'));
     if (stale.length > 0) {
-      execSync(`container rm ${stale.join(' ')}`, { stdio: 'pipe' });
+      execSync(`${runtime} rm ${stale.join(' ')}`, { stdio: 'pipe' });
       logger.info({ count: stale.length }, 'Cleaned up stopped containers');
     }
   } catch {
