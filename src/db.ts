@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
-import { proto } from '@whiskeysockets/baileys';
+import { Message } from 'discord.js';
 
 import { DATA_DIR, STORE_DIR } from './config.js';
 import { NewMessage, RegisteredGroup, ScheduledTask, TaskRunLog } from './types.js';
@@ -117,7 +117,7 @@ export function initDatabase(): void {
  * Used for all chats to enable group discovery without storing sensitive content.
  */
 export function storeChatMetadata(
-  chatJid: string,
+  channelId: string,
   timestamp: string,
   name?: string,
 ): void {
@@ -130,7 +130,7 @@ export function storeChatMetadata(
         name = excluded.name,
         last_message_time = MAX(last_message_time, excluded.last_message_time)
     `,
-    ).run(chatJid, name, timestamp);
+    ).run(channelId, name, timestamp);
   } else {
     // Update timestamp only, preserve existing name if any
     db.prepare(
@@ -139,7 +139,7 @@ export function storeChatMetadata(
       ON CONFLICT(jid) DO UPDATE SET
         last_message_time = MAX(last_message_time, excluded.last_message_time)
     `,
-    ).run(chatJid, chatJid, timestamp);
+    ).run(channelId, channelId, timestamp);
   }
 }
 
@@ -148,13 +148,13 @@ export function storeChatMetadata(
  * New chats get the current time as their initial timestamp.
  * Used during group metadata sync.
  */
-export function updateChatName(chatJid: string, name: string): void {
+export function updateChatName(channelId: string, name: string): void {
   db.prepare(
     `
     INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
     ON CONFLICT(jid) DO UPDATE SET name = excluded.name
   `,
-  ).run(chatJid, name, new Date().toISOString());
+  ).run(channelId, name, new Date().toISOString());
 }
 
 export interface ChatInfo {
@@ -200,40 +200,23 @@ export function setLastGroupSync(): void {
 }
 
 /**
- * Store a message with full content.
- * Only call this for registered groups where message history is needed.
+ * Store a Discord message with full content.
+ * Only call this for registered channels where message history is needed.
  */
-export function storeMessage(
-  msg: proto.IWebMessageInfo,
-  chatJid: string,
-  isFromMe: boolean,
-  pushName?: string,
+export function storeDiscordMessage(
+  msg: Message,
+  channelId: string,
 ): void {
-  if (!msg.key) return;
-
-  const content =
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption ||
-    '';
-
-  const timestamp = new Date(Number(msg.messageTimestamp) * 1000).toISOString();
-  const sender = msg.key.participant || msg.key.remoteJid || '';
-  const senderName = pushName || sender.split('@')[0];
-  const msgId = msg.key.id || '';
+  const content = msg.content || '';
+  const timestamp = msg.createdAt.toISOString();
+  const sender = msg.author.id;
+  const senderName = msg.member?.displayName || msg.author.displayName || msg.author.username;
+  const msgId = msg.id;
+  const isFromMe = msg.author.id === msg.client.user?.id;
 
   db.prepare(
     `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    msgId,
-    chatJid,
-    sender,
-    senderName,
-    content,
-    timestamp,
-    isFromMe ? 1 : 0,
-  );
+  ).run(msgId, channelId, sender, senderName, content, timestamp, isFromMe ? 1 : 0);
 }
 
 export function getNewMessages(
@@ -246,7 +229,7 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -265,20 +248,20 @@ export function getNewMessages(
 }
 
 export function getMessagesSince(
-  chatJid: string,
+  channelId: string,
   sinceTimestamp: string,
   botPrefix: string,
 ): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid, sender, sender_name, content, timestamp
+    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp
   `;
   return db
     .prepare(sql)
-    .all(chatJid, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
+    .all(channelId, sinceTimestamp, `${botPrefix}:%`) as NewMessage[];
 }
 
 export function createTask(
@@ -292,7 +275,7 @@ export function createTask(
   ).run(
     task.id,
     task.group_folder,
-    task.chat_jid,
+    task.channel_id,
     task.prompt,
     task.schedule_type,
     task.schedule_value,
@@ -304,7 +287,7 @@ export function createTask(
 }
 
 export function getTaskById(id: string): ScheduledTask | undefined {
-  return db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as
+  return db.prepare('SELECT id, group_folder, chat_jid AS channel_id, prompt, schedule_type, schedule_value, context_mode, next_run, last_run, last_result, status, created_at FROM scheduled_tasks WHERE id = ?').get(id) as
     | ScheduledTask
     | undefined;
 }
@@ -312,14 +295,14 @@ export function getTaskById(id: string): ScheduledTask | undefined {
 export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
   return db
     .prepare(
-      'SELECT * FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
+      'SELECT id, group_folder, chat_jid AS channel_id, prompt, schedule_type, schedule_value, context_mode, next_run, last_run, last_result, status, created_at FROM scheduled_tasks WHERE group_folder = ? ORDER BY created_at DESC',
     )
     .all(groupFolder) as ScheduledTask[];
 }
 
 export function getAllTasks(): ScheduledTask[] {
   return db
-    .prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
+    .prepare('SELECT id, group_folder, chat_jid AS channel_id, prompt, schedule_type, schedule_value, context_mode, next_run, last_run, last_result, status, created_at FROM scheduled_tasks ORDER BY created_at DESC')
     .all() as ScheduledTask[];
 }
 
@@ -375,7 +358,8 @@ export function getDueTasks(): ScheduledTask[] {
   return db
     .prepare(
       `
-    SELECT * FROM scheduled_tasks
+    SELECT id, group_folder, chat_jid AS channel_id, prompt, schedule_type, schedule_value, context_mode, next_run, last_run, last_result, status, created_at
+    FROM scheduled_tasks
     WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?
     ORDER BY next_run
   `,
@@ -458,11 +442,11 @@ export function getAllSessions(): Record<string, string> {
 // --- Registered group accessors ---
 
 export function getRegisteredGroup(
-  jid: string,
+  channelId: string,
 ): (RegisteredGroup & { jid: string }) | undefined {
   const row = db
     .prepare('SELECT * FROM registered_groups WHERE jid = ?')
-    .get(jid) as
+    .get(channelId) as
     | {
         jid: string;
         name: string;
@@ -488,14 +472,14 @@ export function getRegisteredGroup(
 }
 
 export function setRegisteredGroup(
-  jid: string,
+  channelId: string,
   group: RegisteredGroup,
 ): void {
   db.prepare(
     `INSERT OR REPLACE INTO registered_groups (jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    jid,
+    channelId,
     group.name,
     group.folder,
     group.trigger,
