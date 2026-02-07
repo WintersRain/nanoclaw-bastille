@@ -87,6 +87,15 @@ export function initDatabase(): void {
     /* column already exists */
   }
 
+  // Add mentions_bot column for Discord @mention and reply-to-bot detection
+  try {
+    db.exec(
+      `ALTER TABLE messages ADD COLUMN mentions_bot INTEGER DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // State tables (replacing JSON files)
   db.exec(`
     CREATE TABLE IF NOT EXISTS router_state (
@@ -206,6 +215,7 @@ export function setLastGroupSync(): void {
 export function storeDiscordMessage(
   msg: Message,
   channelId: string,
+  mentionsBot: boolean,
 ): void {
   const content = msg.content || '';
   const timestamp = msg.createdAt.toISOString();
@@ -215,8 +225,8 @@ export function storeDiscordMessage(
   const isFromMe = msg.author.id === msg.client.user?.id;
 
   db.prepare(
-    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(msgId, channelId, sender, senderName, content, timestamp, isFromMe ? 1 : 0);
+    `INSERT OR REPLACE INTO messages (id, chat_jid, sender, sender_name, content, timestamp, is_from_me, mentions_bot) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(msgId, channelId, sender, senderName, content, timestamp, isFromMe ? 1 : 0, mentionsBot ? 1 : 0);
 }
 
 export function getNewMessages(
@@ -229,7 +239,7 @@ export function getNewMessages(
   const placeholders = jids.map(() => '?').join(',');
   // Filter out bot's own messages by checking content prefix (not is_from_me, since user shares the account)
   const sql = `
-    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp
+    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp, mentions_bot
     FROM messages
     WHERE timestamp > ? AND chat_jid IN (${placeholders}) AND content NOT LIKE ?
     ORDER BY timestamp
@@ -254,7 +264,7 @@ export function getMessagesSince(
 ): NewMessage[] {
   // Filter out bot's own messages by checking content prefix
   const sql = `
-    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp
+    SELECT id, chat_jid AS channel_id, sender, sender_name, content, timestamp, mentions_bot
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content NOT LIKE ?
     ORDER BY timestamp

@@ -48,6 +48,7 @@ export interface NewMessage {
   sender_name: string;
   content: string;
   timestamp: string;
+  mentions_bot: number; // 1 if @mention or reply-to-bot
 }
 
 export interface ScheduledTask {

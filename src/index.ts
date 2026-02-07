@@ -173,10 +173,12 @@ async function processGroupMessages(channelId: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // Check if trigger is required and present
+  // For main group: skip trigger check (owner's direct channel)
+  // For other groups: require @mention, reply-to-bot, or trigger pattern
+  if (group.requiresTrigger !== false && !isMainGroup) {
     const hasTrigger = missedMessages.some((m) =>
-      TRIGGER_PATTERN.test(m.content.trim()),
+      m.mentions_bot === 1 || TRIGGER_PATTERN.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
   }
@@ -705,7 +707,7 @@ async function connectDiscord(): Promise<void> {
     startMessageLoop();
   });
 
-  client.on(Events.MessageCreate, (message: Message) => {
+  client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
     const channelId = message.channelId;
     const timestamp = message.createdAt.toISOString();
@@ -715,7 +717,22 @@ async function connectDiscord(): Promise<void> {
 
     // Only store full message content for registered channels
     if (registeredGroups[channelId]) {
-      storeDiscordMessage(message, channelId);
+      // Detect if this message triggers the bot: @mention or reply to bot's message
+      let mentionsBot = false;
+      if (client.user && message.mentions.has(client.user, { ignoreRepliedUser: false })) {
+        mentionsBot = true;
+      }
+      if (!mentionsBot && message.reference?.messageId) {
+        try {
+          const repliedTo = await message.channel.messages.fetch(message.reference.messageId);
+          if (repliedTo.author.id === client.user?.id) {
+            mentionsBot = true;
+          }
+        } catch {
+          // Referenced message may be deleted
+        }
+      }
+      storeDiscordMessage(message, channelId, mentionsBot);
     }
   });
 
