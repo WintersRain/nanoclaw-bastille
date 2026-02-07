@@ -1,4 +1,21 @@
+import fs from 'fs';
 import path from 'path';
+
+// Load .env file into process.env (no external dependency needed)
+const envPath = path.resolve(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx > 0) {
+      const key = trimmed.slice(0, eqIdx);
+      if (!(key in process.env)) {
+        process.env[key] = trimmed.slice(eqIdx + 1);
+      }
+    }
+  }
+}
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
 export const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
