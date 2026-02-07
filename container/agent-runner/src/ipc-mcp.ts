@@ -14,7 +14,7 @@ const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
 export interface IpcMcpContext {
-  chatJid: string;
+  channelId: string;
   groupFolder: string;
   isMain: boolean;
 }
@@ -34,7 +34,7 @@ function writeIpcFile(dir: string, data: object): string {
 }
 
 export function createIpcMcp(ctx: IpcMcpContext) {
-  const { chatJid, groupFolder, isMain } = ctx;
+  const { channelId, groupFolder, isMain } = ctx;
 
   return createSdkMcpServer({
     name: 'nanoclaw',
@@ -49,7 +49,7 @@ export function createIpcMcp(ctx: IpcMcpContext) {
         async (args) => {
           const data = {
             type: 'message',
-            chatJid,
+            channelId,
             text: args.text,
             groupFolder,
             timestamp: new Date().toISOString()
@@ -89,7 +89,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
           schedule_type: z.enum(['cron', 'interval', 'once']).describe('cron=recurring at specific times, interval=recurring every N ms, once=run once at specific time'),
           schedule_value: z.string().describe('cron: "*/5 * * * *" | interval: milliseconds like "300000" | once: local timestamp like "2026-02-01T15:30:00" (no Z suffix!)'),
           context_mode: z.enum(['group', 'isolated']).default('group').describe('group=runs with chat history and memory, isolated=fresh session (include context in prompt)'),
-          ...(isMain ? { target_group_jid: z.string().optional().describe('JID of the group to schedule the task for. The group must be registered — look up JIDs in /workspace/project/data/registered_groups.json (the keys are JIDs). If the group is not registered, let the user know and ask if they want to activate it. Defaults to the current group.') } : {}),
+          ...(isMain ? { target_channel_id: z.string().optional().describe('Discord channel ID (snowflake) to schedule the task for. The channel must be registered — look up channel IDs in /workspace/project/data/registered_groups.json. If the channel is not registered, let the user know and ask if they want to activate it. Defaults to the current channel.') } : {}),
         },
         async (args) => {
           // Validate schedule_value before writing IPC
@@ -120,8 +120,8 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             }
           }
 
-          // Non-main groups can only schedule for themselves
-          const targetJid = isMain && args.target_group_jid ? args.target_group_jid : chatJid;
+          // Non-main channels can only schedule for themselves
+          const targetChannelId = isMain && args.target_channel_id ? args.target_channel_id : channelId;
 
           const data = {
             type: 'schedule_task',
@@ -129,7 +129,7 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
             schedule_type: args.schedule_type,
             schedule_value: args.schedule_value,
             context_mode: args.context_mode || 'group',
-            targetJid,
+            targetChannelId,
             createdBy: groupFolder,
             timestamp: new Date().toISOString()
           };
@@ -278,27 +278,27 @@ SCHEDULE VALUE FORMAT (all times are LOCAL timezone):
       ),
 
       tool(
-        'register_group',
-        `Register a new WhatsApp group so the agent can respond to messages there. Main group only.
+        'register_channel',
+        `Register a Discord channel so the agent can respond to messages there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
+Use available_groups.json to find channel IDs. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
         {
-          jid: z.string().describe('The WhatsApp JID (e.g., "120363336345536173@g.us")'),
-          name: z.string().describe('Display name for the group'),
-          folder: z.string().describe('Folder name for group files (lowercase, hyphens, e.g., "family-chat")'),
+          channelId: z.string().describe('The Discord channel ID (snowflake)'),
+          name: z.string().describe('Display name for the channel'),
+          folder: z.string().describe('Folder name for channel files (lowercase, hyphens, e.g., "family-chat")'),
           trigger: z.string().describe('Trigger word (e.g., "@Andy")')
         },
         async (args) => {
           if (!isMain) {
             return {
-              content: [{ type: 'text', text: 'Only the main group can register new groups.' }],
+              content: [{ type: 'text', text: 'Only the main channel can register new channels.' }],
               isError: true
             };
           }
 
           const data = {
-            type: 'register_group',
-            jid: args.jid,
+            type: 'register_channel',
+            channelId: args.channelId,
             name: args.name,
             folder: args.folder,
             trigger: args.trigger,
@@ -310,7 +310,7 @@ Use available_groups.json to find the JID for a group. The folder name should be
           return {
             content: [{
               type: 'text',
-              text: `Group "${args.name}" registered. It will start receiving messages immediately.`
+              text: `Channel "${args.name}" registered. It will start receiving messages immediately.`
             }]
           };
         }
