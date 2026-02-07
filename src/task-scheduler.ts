@@ -23,11 +23,11 @@ import { logger } from './logger.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (channelId: string, text: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
-  onProcess: (groupJid: string, proc: ChildProcess, containerName: string) => void;
+  onProcess: (channelId: string, proc: ChildProcess, containerName: string) => void;
 }
 
 async function runTask(
@@ -96,17 +96,17 @@ async function runTask(
         prompt: task.prompt,
         sessionId,
         groupFolder: task.group_folder,
-        chatJid: task.chat_jid,
+        channelId: task.channel_id,
         isMain,
       },
-      (proc, containerName) => deps.onProcess(task.chat_jid, proc, containerName),
+      (proc, containerName) => deps.onProcess(task.channel_id, proc, containerName),
     );
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
     } else if (output.result) {
       if (output.result.outputType === 'message' && output.result.userMessage) {
-        await deps.sendMessage(task.chat_jid, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
+        await deps.sendMessage(task.channel_id, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
       }
       result = output.result.userMessage || output.result.internalLog || null;
     }
@@ -176,7 +176,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         }
 
         deps.queue.enqueueTask(
-          currentTask.chat_jid,
+          currentTask.channel_id,
           currentTask.id,
           () => runTask(currentTask, deps),
         );
