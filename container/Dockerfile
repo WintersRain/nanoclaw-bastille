@@ -1,38 +1,15 @@
 # NanoClaw Agent Container
 # Runs Gemini agent with function calling in isolated container
 
-FROM node:22-slim
+FROM node:22-alpine
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    chromium \
-    fonts-liberation \
-    fonts-noto-color-emoji \
-    libgbm1 \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libasound2 \
-    libpangocairo-1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libxshmfence1 \
+# Install minimal system dependencies
+RUN apk add --no-cache \
+    bash \
     curl \
     git \
     grep \
-    python3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set Chromium path for agent-browser
-ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-
-# Install agent-browser globally (headless Chrome automation)
-RUN npm install -g agent-browser
+    python3
 
 # Create app directory
 WORKDIR /app
@@ -52,10 +29,6 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks
 
-# Create entrypoint script
-# Sources env from mounted /workspace/env-dir/env if it exists
-RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\ncat > /tmp/input.json\nnode /app/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace
 
@@ -66,4 +39,4 @@ USER node
 WORKDIR /workspace/group
 
 # Entry point reads JSON from stdin, outputs JSON to stdout
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["node", "/app/dist/index.js"]
