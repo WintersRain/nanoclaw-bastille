@@ -152,33 +152,6 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Environment file directory (workaround for Apple Container -i env var bug)
-  // Only expose specific auth variables needed by Claude Code, not the entire .env
-  const envDir = path.join(DATA_DIR, 'env');
-  fs.mkdirSync(envDir, { recursive: true });
-  const envFile = path.join(projectRoot, '.env');
-  if (fs.existsSync(envFile)) {
-    const envContent = fs.readFileSync(envFile, 'utf-8');
-    const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
-    const filteredLines = envContent.split('\n').filter((line) => {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) return false;
-      return allowedVars.some((v) => trimmed.startsWith(`${v}=`));
-    });
-
-    if (filteredLines.length > 0) {
-      fs.writeFileSync(
-        path.join(envDir, 'env'),
-        filteredLines.join('\n') + '\n',
-      );
-      mounts.push({
-        hostPath: envDir,
-        containerPath: '/workspace/env-dir',
-        readonly: true,
-      });
-    }
-  }
-
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -192,8 +165,46 @@ function buildVolumeMounts(
   return mounts;
 }
 
+/**
+ * Read allowed env vars from .env file for runtime injection.
+ * Secrets are passed via -e flags (never written to disk or baked into images).
+ */
+function getContainerEnvVars(): Record<string, string> {
+  const envVars: Record<string, string> = {};
+  const envFile = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envFile)) return envVars;
+
+  const allowedVars = ['GEMINI_API_KEY', 'GEMINI_MODEL'];
+  const content = fs.readFileSync(envFile, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx);
+    if (allowedVars.includes(key)) {
+      envVars[key] = trimmed.slice(eqIdx + 1);
+    }
+  }
+  return envVars;
+}
+
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // Inject secrets via -e flags at runtime (never written to disk)
+  const envVars = getContainerEnvVars();
+  for (const [key, value] of Object.entries(envVars)) {
+    args.push('-e', `${key}=${value}`);
+  }
+
+  // Security hardening: drop capabilities, limit resources, restrict filesystem
+  args.push('--cap-drop=ALL');
+  args.push('--memory=512m');
+  args.push('--cpus=1');
+  args.push('--read-only');
+  args.push('--tmpfs', '/tmp:rw,noexec,nosuid,size=64m');
+  args.push('--security-opt=no-new-privileges');
 
   // --mount for readonly, -v for read-write (works with both Docker and Apple Container)
   for (const mount of mounts) {

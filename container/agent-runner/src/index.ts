@@ -1,12 +1,15 @@
 /**
- * NanoClaw Agent Runner
- * Runs inside a container, receives config via stdin, outputs result to stdout
+ * NanoClaw Agent Runner (Gemini)
+ * Runs inside a container, receives config via stdin, outputs result to stdout.
+ * Uses Google Gemini with function calling for tool use.
  */
-
 import fs from 'fs';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { createIpcMcp } from './ipc-mcp.js';
+import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
+import * as tools from './tools.js';
+import * as ipc from './ipc.js';
+
+// ─── Types ───────────────────────────────────────────────────────────
 
 interface ContainerInput {
   prompt: string;
@@ -23,26 +26,6 @@ interface AgentResponse {
   internalLog?: string;
 }
 
-const AGENT_RESPONSE_SCHEMA = {
-  type: 'object',
-  properties: {
-    outputType: {
-      type: 'string',
-      enum: ['message', 'log'],
-      description: '"message": the userMessage field contains a message to send to the user or group. "log": the output will not be sent to the user or group.',
-    },
-    userMessage: {
-      type: 'string',
-      description: 'A message to send to the user or group. Include when outputType is "message".',
-    },
-    internalLog: {
-      type: 'string',
-      description: 'Information that will be logged internally but not sent to the user or group.',
-    },
-  },
-  required: ['outputType'],
-} as const;
-
 interface ContainerOutput {
   status: 'success' | 'error';
   result: AgentResponse | null;
@@ -50,29 +33,311 @@ interface ContainerOutput {
   error?: string;
 }
 
-interface SessionEntry {
-  sessionId: string;
-  fullPath: string;
-  summary: string;
-  firstPrompt: string;
+// Content types matching Gemini API structure
+interface GeminiContent {
+  role: 'user' | 'model';
+  parts: GeminiPart[];
 }
 
-interface SessionsIndex {
-  entries: SessionEntry[];
+// Using 'any' for parts to preserve all fields from Gemini API responses
+// (including thoughtSignature required by Gemini 3 for function calling)
+type GeminiPart = Record<string, unknown>;
+
+interface SessionData {
+  history: GeminiContent[];
+  createdAt: string;
 }
+
+// ─── Constants ───────────────────────────────────────────────────────
+
+const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
+const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const MAX_TURNS = 30; // Safety limit on agentic loop
+const SESSIONS_DIR = '/workspace/group/.sessions';
+
+// ─── Function Declarations for Gemini ────────────────────────────────
+
+const functionDeclarations: FunctionDeclaration[] = [
+  {
+    name: 'bash',
+    description:
+      'Execute a bash command in the container. Use for running scripts, git, system commands. Working directory is /workspace/group.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        command: { type: Type.STRING, description: 'The bash command to execute' },
+        timeout_ms: {
+          type: Type.NUMBER,
+          description: 'Optional timeout in milliseconds (default 120000)',
+        },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'read_file',
+    description:
+      'Read a file from the filesystem. Paths are relative to /workspace/group or absolute. Returns numbered lines.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        path: { type: Type.STRING, description: 'File path to read' },
+        offset: { type: Type.NUMBER, description: 'Start line (1-indexed)' },
+        limit: { type: Type.NUMBER, description: 'Number of lines to read' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'write_file',
+    description: 'Write content to a file. Creates parent directories if needed.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        path: { type: Type.STRING, description: 'File path to write' },
+        content: { type: Type.STRING, description: 'File content' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'edit_file',
+    description:
+      'Edit a file by replacing an exact string match. The old_string must appear exactly once in the file.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        path: { type: Type.STRING, description: 'File path to edit' },
+        old_string: { type: Type.STRING, description: 'Exact text to find' },
+        new_string: { type: Type.STRING, description: 'Replacement text' },
+      },
+      required: ['path', 'old_string', 'new_string'],
+    },
+  },
+  {
+    name: 'list_files',
+    description: 'List files matching a glob pattern (e.g., "**/*.md", "memory/*.json").',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        pattern: { type: Type.STRING, description: 'Glob pattern' },
+        directory: { type: Type.STRING, description: 'Directory to search in (relative)' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'search_files',
+    description: 'Search file contents for a regex pattern. Returns matching lines with line numbers.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        pattern: { type: Type.STRING, description: 'Regex pattern to search for' },
+        path: { type: Type.STRING, description: 'File or directory to search' },
+        context_lines: { type: Type.NUMBER, description: 'Lines of context around matches' },
+      },
+      required: ['pattern'],
+    },
+  },
+  {
+    name: 'google_search',
+    description:
+      'Search the web using Google Search. Returns grounded, up-to-date results. Use this for current events, facts, lookups, or anything that needs real-time web data.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: { type: Type.STRING, description: 'Search query' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'web_fetch',
+    description: 'Fetch content from a URL. Returns raw text/HTML.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        url: { type: Type.STRING, description: 'URL to fetch' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'send_message',
+    description:
+      'Send a message to the chat immediately while you are still running. You can call this multiple times.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        text: { type: Type.STRING, description: 'Message text to send' },
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'schedule_task',
+    description:
+      'Schedule a recurring or one-time task. schedule_type: "cron" (e.g., "0 9 * * *"), "interval" (milliseconds), or "once" (ISO timestamp, no Z suffix). context_mode: "group" (with chat history) or "isolated" (fresh session).',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        prompt: { type: Type.STRING, description: 'What the agent should do when the task runs' },
+        schedule_type: { type: Type.STRING, description: 'cron | interval | once' },
+        schedule_value: { type: Type.STRING, description: 'Schedule expression' },
+        context_mode: { type: Type.STRING, description: 'group | isolated' },
+      },
+      required: ['prompt', 'schedule_type', 'schedule_value'],
+    },
+  },
+  {
+    name: 'list_tasks',
+    description: 'List all scheduled tasks.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
+    },
+  },
+  {
+    name: 'pause_task',
+    description: 'Pause a scheduled task.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        task_id: { type: Type.STRING, description: 'Task ID to pause' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'resume_task',
+    description: 'Resume a paused task.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        task_id: { type: Type.STRING, description: 'Task ID to resume' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'cancel_task',
+    description: 'Cancel and delete a scheduled task.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        task_id: { type: Type.STRING, description: 'Task ID to cancel' },
+      },
+      required: ['task_id'],
+    },
+  },
+];
+
+// ─── Tool Execution ──────────────────────────────────────────────────
+
+async function executeTool(name: string, args: Record<string, unknown>, ipcCtx: ipc.IpcContext): Promise<string> {
+  switch (name) {
+    case 'bash':
+      return tools.bash(args.command as string, args.timeout_ms as number | undefined);
+    case 'read_file':
+      return tools.readFile(args.path as string, args.offset as number | undefined, args.limit as number | undefined);
+    case 'write_file':
+      return tools.writeFile(args.path as string, args.content as string);
+    case 'edit_file':
+      return tools.editFile(args.path as string, args.old_string as string, args.new_string as string);
+    case 'list_files':
+      return tools.listFiles(args.pattern as string, args.directory as string | undefined);
+    case 'search_files':
+      return tools.searchFiles(args.pattern as string, args.path as string | undefined, args.context_lines as number | undefined);
+    case 'google_search':
+      return await tools.googleSearch(args.query as string);
+    case 'web_fetch':
+      return tools.webFetch(args.url as string);
+    case 'send_message':
+      return ipc.sendMessage(ipcCtx, args.text as string);
+    case 'schedule_task':
+      return ipc.scheduleTask(
+        ipcCtx,
+        args.prompt as string,
+        args.schedule_type as string,
+        args.schedule_value as string,
+        (args.context_mode as string) || 'group',
+        args.target_channel_id as string | undefined,
+      );
+    case 'list_tasks':
+      return ipc.listTasks(ipcCtx);
+    case 'pause_task':
+      return ipc.taskAction(ipcCtx, 'pause_task', args.task_id as string);
+    case 'resume_task':
+      return ipc.taskAction(ipcCtx, 'resume_task', args.task_id as string);
+    case 'cancel_task':
+      return ipc.taskAction(ipcCtx, 'cancel_task', args.task_id as string);
+    default:
+      return `Unknown tool: ${name}`;
+  }
+}
+
+// ─── Session Management ──────────────────────────────────────────────
+
+function loadSession(sessionId: string): GeminiContent[] | null {
+  const sessionPath = path.join(SESSIONS_DIR, `${sessionId}.json`);
+  if (!fs.existsSync(sessionPath)) return null;
+  try {
+    const data: SessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf-8'));
+    return data.history;
+  } catch {
+    return null;
+  }
+}
+
+function saveSession(sessionId: string, history: GeminiContent[]): void {
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  const data: SessionData = { history, createdAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(SESSIONS_DIR, `${sessionId}.json`), JSON.stringify(data));
+}
+
+function generateSessionId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// ─── Conversation Archive ────────────────────────────────────────────
+
+function archiveConversation(history: GeminiContent[]): void {
+  const conversationsDir = '/workspace/group/conversations';
+  fs.mkdirSync(conversationsDir, { recursive: true });
+
+  const lines: string[] = [];
+  const date = new Date().toISOString().split('T')[0];
+
+  for (const msg of history) {
+    const role = msg.role === 'user' ? 'User' : 'Agent';
+    const text = msg.parts
+      ?.filter((p): p is { text: string } => 'text' in p && typeof (p as { text?: string }).text === 'string')
+      .map((p) => p.text)
+      .join('');
+    if (text) {
+      const trimmed = text.length > 2000 ? text.slice(0, 2000) + '...' : text;
+      lines.push(`**${role}**: ${trimmed}\n`);
+    }
+  }
+
+  if (lines.length > 0) {
+    const time = new Date().toTimeString().slice(0, 5).replace(':', '');
+    const filename = `${date}-conversation-${time}.md`;
+    fs.writeFileSync(path.join(conversationsDir, filename), `# Conversation\n\n${lines.join('\n')}`);
+  }
+}
+
+// ─── I/O ─────────────────────────────────────────────────────────────
 
 async function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', chunk => { data += chunk; });
+    process.stdin.on('data', (chunk) => (data += chunk));
     process.stdin.on('end', () => resolve(data));
     process.stdin.on('error', reject);
   });
 }
-
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
@@ -84,147 +349,37 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
-function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
-  // sessions-index.json is in the same directory as the transcript
-  const projectDir = path.dirname(transcriptPath);
-  const indexPath = path.join(projectDir, 'sessions-index.json');
+// ─── System Prompt Builder ───────────────────────────────────────────
 
-  if (!fs.existsSync(indexPath)) {
-    log(`Sessions index not found at ${indexPath}`);
-    return null;
+function buildSystemPrompt(input: ContainerInput): string {
+  const parts: string[] = [];
+
+  // Load GEMINI.md (identity file)
+  const identityPath = '/workspace/group/GEMINI.md';
+  if (fs.existsSync(identityPath)) {
+    parts.push(fs.readFileSync(identityPath, 'utf-8'));
   }
 
-  try {
-    const index: SessionsIndex = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-    const entry = index.entries.find(e => e.sessionId === sessionId);
-    if (entry?.summary) {
-      return entry.summary;
-    }
-  } catch (err) {
-    log(`Failed to read sessions index: ${err instanceof Error ? err.message : String(err)}`);
+  // Load global GEMINI.md
+  const globalPath = '/workspace/global/GEMINI.md';
+  if (!input.isMain && fs.existsSync(globalPath)) {
+    parts.push('\n---\n## Global Context\n' + fs.readFileSync(globalPath, 'utf-8'));
   }
 
-  return null;
+  // Response format instruction
+  parts.push(`
+---
+## Response Format
+
+When you are done working, output your final response as plain text. This text will be sent directly to the Discord chat.
+- Write naturally as yourself.
+- Do NOT wrap your response in JSON or code blocks.
+- You were specifically addressed or mentioned — always respond with something.`);
+
+  return parts.join('\n');
 }
 
-/**
- * Archive the full transcript to conversations/ before compaction.
- */
-function createPreCompactHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preCompact = input as PreCompactHookInput;
-    const transcriptPath = preCompact.transcript_path;
-    const sessionId = preCompact.session_id;
-
-    if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-      log('No transcript found for archiving');
-      return {};
-    }
-
-    try {
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const messages = parseTranscript(content);
-
-      if (messages.length === 0) {
-        log('No messages to archive');
-        return {};
-      }
-
-      const summary = getSessionSummary(sessionId, transcriptPath);
-      const name = summary ? sanitizeFilename(summary) : generateFallbackName();
-
-      const conversationsDir = '/workspace/group/conversations';
-      fs.mkdirSync(conversationsDir, { recursive: true });
-
-      const date = new Date().toISOString().split('T')[0];
-      const filename = `${date}-${name}.md`;
-      const filePath = path.join(conversationsDir, filename);
-
-      const markdown = formatTranscriptMarkdown(messages, summary);
-      fs.writeFileSync(filePath, markdown);
-
-      log(`Archived conversation to ${filePath}`);
-    } catch (err) {
-      log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    return {};
-  };
-}
-
-function sanitizeFilename(summary: string): string {
-  return summary
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 50);
-}
-
-function generateFallbackName(): string {
-  const time = new Date();
-  return `conversation-${time.getHours().toString().padStart(2, '0')}${time.getMinutes().toString().padStart(2, '0')}`;
-}
-
-interface ParsedMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
-
-function parseTranscript(content: string): ParsedMessage[] {
-  const messages: ParsedMessage[] = [];
-
-  for (const line of content.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry.type === 'user' && entry.message?.content) {
-        const text = typeof entry.message.content === 'string'
-          ? entry.message.content
-          : entry.message.content.map((c: { text?: string }) => c.text || '').join('');
-        if (text) messages.push({ role: 'user', content: text });
-      } else if (entry.type === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content
-          .filter((c: { type: string }) => c.type === 'text')
-          .map((c: { text: string }) => c.text);
-        const text = textParts.join('');
-        if (text) messages.push({ role: 'assistant', content: text });
-      }
-    } catch {
-    }
-  }
-
-  return messages;
-}
-
-function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | null): string {
-  const now = new Date();
-  const formatDateTime = (d: Date) => d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true
-  });
-
-  const lines: string[] = [];
-  lines.push(`# ${title || 'Conversation'}`);
-  lines.push('');
-  lines.push(`Archived: ${formatDateTime(now)}`);
-  lines.push('');
-  lines.push('---');
-  lines.push('');
-
-  for (const msg of messages) {
-    const sender = msg.role === 'user' ? 'User' : 'Andy';
-    const content = msg.content.length > 2000
-      ? msg.content.slice(0, 2000) + '...'
-      : msg.content;
-    lines.push(`**${sender}**: ${content}`);
-    lines.push('');
-  }
-
-  return lines.join('\n');
-}
+// ─── Main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   let input: ContainerInput;
@@ -237,105 +392,154 @@ async function main(): Promise<void> {
     writeOutput({
       status: 'error',
       result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
   }
 
-  const ipcMcp = createIpcMcp({
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    writeOutput({ status: 'error', result: null, error: 'GEMINI_API_KEY not set' });
+    process.exit(1);
+  }
+
+  const modelName = process.env.GEMINI_MODEL || 'gemini-3-flash-preview';
+  const ai = new GoogleGenAI({ apiKey });
+
+  const ipcCtx: ipc.IpcContext = {
     channelId: input.channelId,
     groupFolder: input.groupFolder,
-    isMain: input.isMain
-  });
+    isMain: input.isMain,
+  };
 
-  let result: AgentResponse | null = null;
-  let newSessionId: string | undefined;
+  const systemPrompt = buildSystemPrompt(input);
 
-  // Add context for scheduled tasks
+  // Gemini tools: function declarations for agent capabilities
+  // Note: googleSearch cannot be combined with functionDeclarations in the same request
+  const geminiTools = [
+    { functionDeclarations },
+  ];
+
+  // Load or start session
+  let contents: GeminiContent[] = [];
+  const sessionId = input.sessionId || generateSessionId();
+
+  if (input.sessionId) {
+    const loaded = loadSession(input.sessionId);
+    if (loaded) {
+      contents = loaded;
+      log(`Resumed session: ${input.sessionId} (${loaded.length} entries)`);
+    }
+  }
+
+  // Build user prompt
   let prompt = input.prompt;
   if (input.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${input.prompt}`;
+    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!input.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
+  // Add user message to contents
+  contents.push({ role: 'user', parts: [{ text: prompt }] });
+
+  let result: AgentResponse | null = null;
+  let turns = 0;
 
   try {
     log('Starting agent...');
 
-    for await (const message of query({
-      prompt,
-      options: {
-        cwd: '/workspace/group',
-        resume: input.sessionId,
-        systemPrompt: globalClaudeMd
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
-          : undefined,
-        allowedTools: [
-          'Bash',
-          'Read', 'Write', 'Edit', 'Glob', 'Grep',
-          'WebSearch', 'WebFetch',
-          'mcp__nanoclaw__*'
-        ],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project'],
-        mcpServers: {
-          nanoclaw: ipcMcp
-        },
-        hooks: {
-          PreCompact: [{ hooks: [createPreCompactHook()] }]
-        },
-        outputFormat: {
-          type: 'json_schema',
-          schema: AGENT_RESPONSE_SCHEMA,
-        }
-      }
-    })) {
-      if (message.type === 'system' && message.subtype === 'init') {
-        newSessionId = message.session_id;
-        log(`Session initialized: ${newSessionId}`);
-      }
+    while (turns < MAX_TURNS) {
+      turns++;
 
-      if (message.type === 'result') {
-        if (message.subtype === 'success' && message.structured_output) {
-          result = message.structured_output as AgentResponse;
-          if (result.outputType === 'message' && !result.userMessage) {
-            log('Warning: outputType is "message" but userMessage is missing, treating as "log"');
-            result = { outputType: 'log', internalLog: result.internalLog };
-          }
-          log(`Agent result: outputType=${result.outputType}${result.internalLog ? `, log=${result.internalLog}` : ''}`);
-        } else if (message.subtype === 'success' || message.subtype === 'error_max_structured_output_retries') {
-          // Structured output missing or agent couldn't produce valid structured output — fall back to text
-          log(`Structured output unavailable (subtype=${message.subtype}), falling back to text`);
-          const textResult = 'result' in message ? (message as { result?: string }).result : null;
-          if (textResult) {
-            result = { outputType: 'message', userMessage: textResult };
-          }
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents,
+        config: {
+          systemInstruction: systemPrompt,
+          tools: geminiTools,
+        },
+      });
+
+      // Check for function calls
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        // Preserve raw model parts (includes thoughtSignature required by Gemini 3)
+        const rawParts = response.candidates?.[0]?.content?.parts;
+        if (rawParts) {
+          contents.push({ role: 'model', parts: rawParts as GeminiPart[] });
+        } else {
+          // Fallback: reconstruct from convenience property
+          contents.push({
+            role: 'model',
+            parts: response.functionCalls.map((fc) => ({
+              functionCall: { name: fc.name!, args: (fc.args ?? {}) as Record<string, unknown> },
+            })),
+          });
         }
+
+        // Execute all function calls
+        const functionResponses: GeminiPart[] = [];
+        for (const fc of response.functionCalls) {
+          const name = fc.name!;
+          log(`Tool call: ${name}`);
+          const toolResult = await executeTool(name, (fc.args ?? {}) as Record<string, unknown>, ipcCtx);
+          functionResponses.push({
+            functionResponse: {
+              name,
+              response: { result: toolResult },
+            },
+          });
+        }
+
+        // Add function responses to history
+        contents.push({ role: 'user', parts: functionResponses });
+      } else {
+        // Text response — final answer
+        const text = (response.text || '').trim();
+
+        // Add model's text response to history
+        contents.push({ role: 'model', parts: [{ text }] });
+
+        // Strip any stray markers the model might include
+        const cleaned = text.replace(/\[SILENT\]/gi, '').trim();
+        if (!cleaned) {
+          result = { outputType: 'log', internalLog: 'Agent returned empty response' };
+        } else {
+          result = { outputType: 'message', userMessage: cleaned };
+        }
+        break;
       }
     }
 
-    log('Agent completed successfully');
+    if (turns >= MAX_TURNS) {
+      log(`Hit max turns (${MAX_TURNS})`);
+    }
+
+    // Save session
+    saveSession(sessionId, contents);
+
+    // Archive conversation
+    try {
+      archiveConversation(contents);
+    } catch (err) {
+      log(`Archive failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Validate result
+    if (result?.outputType === 'message' && !result.userMessage) {
+      log('Warning: outputType is "message" but userMessage is missing');
+      result = { outputType: 'log', internalLog: result.internalLog };
+    }
+
+    log(`Agent completed: outputType=${result?.outputType ?? 'none'} turns=${turns}`);
+
     writeOutput({
       status: 'success',
       result: result ?? { outputType: 'log' },
-      newSessionId
+      newSessionId: sessionId,
     });
-
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
-    writeOutput({
-      status: 'error',
-      result: null,
-      newSessionId,
-      error: errorMessage
-    });
+    writeOutput({ status: 'error', result: null, newSessionId: sessionId, error: errorMessage });
     process.exit(1);
   }
 }

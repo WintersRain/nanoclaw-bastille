@@ -9,6 +9,13 @@ store/
 data/
 logs/
 
+# Personal content (memories, identity files, registration scripts)
+groups/*/memory/
+groups/*/conversations/
+groups/*/logs/
+groups/*/.sessions/
+register-*.js
+
 # Secrets
 *.keys.json
 .env

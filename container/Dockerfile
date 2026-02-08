@@ -1,9 +1,9 @@
 # NanoClaw Agent Container
-# Runs Claude Agent SDK in isolated Linux VM with browser automation
+# Runs Gemini agent with function calling in isolated container
 
 FROM node:22-slim
 
-# Install system dependencies for Chromium
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -23,14 +23,16 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    grep \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser globally (headless Chrome automation)
+RUN npm install -g agent-browser
 
 # Create app directory
 WORKDIR /app
@@ -51,13 +53,13 @@ RUN npm run build
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks
 
 # Create entrypoint script
-# Sources env from mounted /workspace/env-dir/env if it exists (workaround for Apple Container -i bug)
+# Sources env from mounted /workspace/env-dir/env if it exists
 RUN printf '#!/bin/bash\nset -e\n[ -f /workspace/env-dir/env ] && export $(cat /workspace/env-dir/env | xargs)\ncat > /tmp/input.json\nnode /app/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace
 
-# Switch to non-root user (required for --dangerously-skip-permissions)
+# Switch to non-root user
 USER node
 
 # Set working directory to group workspace

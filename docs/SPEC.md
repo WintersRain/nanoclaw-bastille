@@ -1,6 +1,6 @@
 # NanoClaw Specification
 
-A personal Claude assistant accessible via WhatsApp, with persistent memory per conversation, scheduled tasks, and email integration.
+A personal Gemini assistant accessible via Discord, with persistent memory per conversation, scheduled tasks, and web access.
 
 ---
 
@@ -29,8 +29,8 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                      │
 │  ┌──────────────┐                     ┌────────────────────┐        │
-│  │  WhatsApp    │────────────────────▶│   SQLite Database  │        │
-│  │  (baileys)   │◀────────────────────│   (messages.db)    │        │
+│  │  Discord     │────────────────────▶│   SQLite Database  │        │
+│  │  (discord.js)│◀────────────────────│   (messages.db)    │        │
 │  └──────────────┘   store/send        └─────────┬──────────┘        │
 │                                                  │                   │
 │         ┌────────────────────────────────────────┘                   │
@@ -45,7 +45,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 │                       │ spawns container                             │
 │                       ▼                                              │
 ├─────────────────────────────────────────────────────────────────────┤
-│                  APPLE CONTAINER (Linux VM)                          │
+│                  DOCKER CONTAINER                                    │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │                    AGENT RUNNER                               │   │
@@ -54,7 +54,6 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 │  │  Volume mounts:                                                │   │
 │  │    • groups/{name}/ → /workspace/group                         │   │
 │  │    • groups/global/ → /workspace/global/ (non-main only)        │   │
-│  │    • data/sessions/{group}/.claude/ → /home/node/.claude/      │   │
 │  │    • Additional dirs → /workspace/extra/*                      │   │
 │  │                                                                │   │
 │  │  Tools (all groups):                                           │   │
@@ -62,7 +61,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 │  │    • Read, Write, Edit, Glob, Grep (file operations)           │   │
 │  │    • WebSearch, WebFetch (internet access)                     │   │
 │  │    • agent-browser (browser automation)                        │   │
-│  │    • mcp__nanoclaw__* (scheduler tools via IPC)                │   │
+│  │    • send_message, schedule/list/pause/resume/cancel_task      │   │
 │  │                                                                │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                                                                      │
@@ -73,10 +72,10 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| WhatsApp Connection | Node.js (@whiskeysockets/baileys) | Connect to WhatsApp, send/receive messages |
+| Discord Connection | Node.js (discord.js) | Connect to Discord, send/receive messages |
 | Message Storage | SQLite (better-sqlite3) | Store messages for polling |
-| Container Runtime | Apple Container | Isolated Linux VMs for agent execution |
-| Agent | @anthropic-ai/claude-agent-sdk (0.2.29) | Run Claude with tools and MCP servers |
+| Container Runtime | Docker | Isolated containers for agent execution |
+| Agent | @google/genai | Run Gemini with tools and function calling |
 | Browser Automation | agent-browser + Chromium | Web interaction and screenshots |
 | Runtime | Node.js 20+ | Host process for routing and scheduling |
 
@@ -98,24 +97,24 @@ nanoclaw/
 ├── .gitignore
 │
 ├── src/
-│   ├── index.ts                   # Main application (WhatsApp + routing)
+│   ├── index.ts                   # Main application (Discord + routing)
 │   ├── config.ts                  # Configuration constants
 │   ├── types.ts                   # TypeScript interfaces
 │   ├── utils.ts                   # Generic utility functions
 │   ├── db.ts                      # Database initialization and queries
-│   ├── whatsapp-auth.ts           # Standalone WhatsApp authentication
+│   ├── discord-auth.ts            # Standalone Discord authentication
 │   ├── task-scheduler.ts          # Runs scheduled tasks when due
 │   └── container-runner.ts        # Spawns agents in Apple Containers
 │
 ├── container/
-│   ├── Dockerfile                 # Container image (runs as 'node' user, includes Claude Code CLI)
+│   ├── Dockerfile                 # Container image (runs as 'node' user, includes Gemini agent runner)
 │   ├── build.sh                   # Build script for container image
 │   ├── agent-runner/              # Code that runs inside the container
 │   │   ├── package.json
 │   │   ├── tsconfig.json
 │   │   └── src/
-│   │       ├── index.ts           # Entry point (reads JSON, runs agent)
-│   │       └── ipc-mcp.ts         # MCP server for host communication
+│   │       ├── index.ts           # Entry point (reads JSON, runs Gemini agent)
+│   │       └── tools.ts           # Tool implementations for function calling
 │   └── skills/
 │       └── agent-browser.md       # Browser automation skill
 │
@@ -141,14 +140,13 @@ nanoclaw/
 │       └── *.md                   # Files created by the agent
 │
 ├── store/                         # Local data (gitignored)
-│   ├── auth/                      # WhatsApp authentication state
 │   └── messages.db                # SQLite database (messages, scheduled_tasks, task_run_logs)
 │
 ├── data/                          # Application state (gitignored)
 │   ├── sessions.json              # Active session IDs per group
 │   ├── registered_groups.json     # Group JID → folder mapping
 │   ├── router_state.json          # Last processed timestamp + last agent timestamps
-│   ├── env/env                    # Copy of .env for container mounting
+│   ├── env/env                    # Reserved for container env (credentials passed via -e flags)
 │   └── ipc/                       # Container IPC (messages/, tasks/)
 │
 ├── logs/                          # Runtime logs (gitignored)
@@ -216,24 +214,18 @@ Groups can have additional directories mounted via `containerConfig` in `data/re
 
 Additional mounts appear at `/workspace/extra/{containerPath}` inside the container.
 
-**Apple Container mount syntax note:** Read-write mounts use `-v host:container`, but readonly mounts require `--mount "type=bind,source=...,target=...,readonly"` (the `:ro` suffix doesn't work).
+**Docker mount syntax:** Read-write mounts use `-v host:container`, readonly mounts use `-v host:container:ro`.
 
-### Claude Authentication
+### Gemini Authentication
 
-Configure authentication in a `.env` file in the project root. Two options:
+Configure authentication in a `.env` file in the project root:
 
-**Option 1: Claude Subscription (OAuth token)**
 ```bash
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-```
-The token can be extracted from `~/.claude/.credentials.json` if you're logged in to Claude Code.
-
-**Option 2: Pay-per-use API Key**
-```bash
-ANTHROPIC_API_KEY=sk-ant-api03-...
+GEMINI_API_KEY=AIza...
+GEMINI_MODEL=gemini-3-flash-preview
 ```
 
-Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are extracted from `.env` and mounted into the container at `/workspace/env-dir/env`, then sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because Apple Container loses `-e` environment variables when using `-i` (interactive mode with piped stdin).
+The `GEMINI_API_KEY` and `GEMINI_MODEL` variables are passed to the container at runtime via Docker `-e` flags (runtime injection). This ensures credentials are not written to the filesystem inside the container.
 
 ### Changing the Assistant Name
 
@@ -272,7 +264,7 @@ NanoClaw uses a hierarchical memory system based on CLAUDE.md files.
 
 1. **Agent Context Loading**
    - Agent runs with `cwd` set to `groups/{group-name}/`
-   - Claude Agent SDK with `settingSources: ['project']` automatically loads:
+   - The agent runner automatically loads:
      - `../CLAUDE.md` (parent directory = global memory)
      - `./CLAUDE.md` (current directory = group memory)
 
@@ -291,13 +283,13 @@ NanoClaw uses a hierarchical memory system based on CLAUDE.md files.
 
 ## Session Management
 
-Sessions enable conversation continuity - Claude remembers what you talked about.
+Sessions enable conversation continuity - Gemini remembers what you talked about.
 
 ### How Sessions Work
 
 1. Each group has a session ID stored in `data/sessions.json`
-2. Session ID is passed to Claude Agent SDK's `resume` option
-3. Claude continues the conversation with full context
+2. Session ID is passed to the agent runner's `resume` option
+3. Gemini continues the conversation with full context
 
 **data/sessions.json:**
 ```json
@@ -314,10 +306,10 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 ### Incoming Message Flow
 
 ```
-1. User sends WhatsApp message
+1. User sends Discord message
    │
    ▼
-2. Baileys receives message via WhatsApp Web protocol
+2. discord.js receives message via Discord gateway
    │
    ▼
 3. Message stored in SQLite (store/messages.db)
@@ -337,19 +329,19 @@ Sessions enable conversation continuity - Claude remembers what you talked about
    └── Build prompt with full conversation context
    │
    ▼
-7. Router invokes Claude Agent SDK:
+7. Router invokes Gemini agent runner:
    ├── cwd: groups/{group-name}/
    ├── prompt: conversation history + current message
    ├── resume: session_id (for continuity)
-   └── mcpServers: nanoclaw (scheduler)
+   └── tools: function declarations (scheduler, file ops, etc.)
    │
    ▼
-8. Claude processes message:
+8. Gemini processes message:
    ├── Reads CLAUDE.md files for context
    └── Uses tools as needed (search, email, etc.)
    │
    ▼
-9. Router prefixes response with assistant name and sends via WhatsApp
+9. Router prefixes response with assistant name and sends via Discord
    │
    ▼
 10. Router updates last agent timestamp and saves session ID
@@ -358,7 +350,7 @@ Sessions enable conversation continuity - Claude remembers what you talked about
 ### Trigger Word Matching
 
 Messages must start with the trigger pattern (default: `@Andy`):
-- `@Andy what's the weather?` → ✅ Triggers Claude
+- `@Andy what's the weather?` → ✅ Triggers Gemini
 - `@andy help me` → ✅ Triggers (case insensitive)
 - `Hey @Andy` → ❌ Ignored (trigger not at start)
 - `What's up?` → ❌ Ignored (no trigger)
@@ -383,7 +375,7 @@ This allows the agent to understand the conversation context even if it wasn't m
 
 | Command | Example | Effect |
 |---------|---------|--------|
-| `@Assistant [message]` | `@Andy what's the weather?` | Talk to Claude |
+| `@Assistant [message]` | `@Andy what's the weather?` | Talk to Gemini |
 
 ### Commands Available in Main Channel Only
 
@@ -420,14 +412,14 @@ NanoClaw has a built-in scheduler that runs tasks as full agents in their group'
 ```
 User: @Andy remind me every Monday at 9am to review the weekly metrics
 
-Claude: [calls mcp__nanoclaw__schedule_task]
+Gemini: [calls schedule_task]
         {
           "prompt": "Send a reminder to review weekly metrics. Be encouraging!",
           "schedule_type": "cron",
           "schedule_value": "0 9 * * 1"
         }
 
-Claude: Done! I'll remind you every Monday at 9am.
+Gemini: Done! I'll remind you every Monday at 9am.
 ```
 
 ### One-Time Tasks
@@ -435,7 +427,7 @@ Claude: Done! I'll remind you every Monday at 9am.
 ```
 User: @Andy at 5pm today, send me a summary of today's emails
 
-Claude: [calls mcp__nanoclaw__schedule_task]
+Gemini: [calls schedule_task]
         {
           "prompt": "Search for today's emails, summarize the important ones, and send the summary to the group.",
           "schedule_type": "once",
@@ -473,7 +465,7 @@ The `nanoclaw` MCP server is created dynamically per agent call with the current
 | `pause_task` | Pause a task |
 | `resume_task` | Resume a paused task |
 | `cancel_task` | Delete a task |
-| `send_message` | Send a WhatsApp message to the group |
+| `send_message` | Send a Discord message to the group |
 
 ---
 
@@ -484,13 +476,12 @@ NanoClaw runs as a single macOS launchd service.
 ### Startup Sequence
 
 When NanoClaw starts, it:
-1. **Ensures Apple Container system is running** - Automatically starts it if needed (survives reboots)
-2. Initializes the SQLite database
-3. Loads state (registered groups, sessions, router state)
-4. Connects to WhatsApp
-5. Starts the message polling loop
-6. Starts the scheduler loop
-7. Starts the IPC watcher for container messages
+1. Initializes the SQLite database
+2. Loads state (registered groups, sessions, router state)
+3. Connects to Discord
+4. Starts the message polling loop
+5. Starts the scheduler loop
+6. Starts the IPC watcher for container messages
 
 ### Service: com.nanoclaw
 
@@ -555,7 +546,7 @@ tail -f logs/nanoclaw.log
 
 ### Container Isolation
 
-All agents run inside Apple Container (lightweight Linux VMs), providing:
+All agents run inside Docker containers, providing:
 - **Filesystem isolation**: Agents can only access mounted directories
 - **Safe Bash access**: Commands run inside the container, not on your Mac
 - **Network isolation**: Can be configured per-container if needed
@@ -564,7 +555,7 @@ All agents run inside Apple Container (lightweight Linux VMs), providing:
 
 ### Prompt Injection Risk
 
-WhatsApp messages could contain malicious instructions attempting to manipulate Claude's behavior.
+Discord messages could contain malicious instructions attempting to manipulate Gemini's behavior.
 
 **Mitigations:**
 - Container isolation limits blast radius
@@ -572,7 +563,7 @@ WhatsApp messages could contain malicious instructions attempting to manipulate 
 - Trigger word required (reduces accidental processing)
 - Agents can only access their group's mounted directories
 - Main can configure additional directories per group
-- Claude's built-in safety training
+- Gemini's built-in safety training
 
 **Recommendations:**
 - Only register trusted groups
@@ -584,8 +575,8 @@ WhatsApp messages could contain malicious instructions attempting to manipulate 
 
 | Credential | Storage Location | Notes |
 |------------|------------------|-------|
-| Claude CLI Auth | data/sessions/{group}/.claude/ | Per-group isolation, mounted to /home/node/.claude/ |
-| WhatsApp Session | store/auth/ | Auto-created, persists ~20 days |
+| Gemini API Key | `.env` file, passed via Docker `-e` flags | Runtime injection, not mounted as file |
+| Discord Bot Token | `.env` file | Per-instance bot token |
 
 ### File Permissions
 
@@ -603,11 +594,9 @@ chmod 700 groups/
 | Issue | Cause | Solution |
 |-------|-------|----------|
 | No response to messages | Service not running | Check `launchctl list | grep nanoclaw` |
-| "Claude Code process exited with code 1" | Apple Container failed to start | Check logs; NanoClaw auto-starts container system but may fail |
-| "Claude Code process exited with code 1" | Session mount path wrong | Ensure mount is to `/home/node/.claude/` not `/root/.claude/` |
+| Agent container exited with error | Docker failed to start | Check logs; ensure Docker is running |
 | Session not continuing | Session ID not saved | Check `data/sessions.json` |
-| Session not continuing | Mount path mismatch | Container user is `node` with HOME=/home/node; sessions must be at `/home/node/.claude/` |
-| "QR code expired" | WhatsApp session expired | Delete store/auth/ and restart |
+| Bot not connecting | Invalid Discord token | Check DISCORD_BOT_TOKEN in `.env` |
 | "No groups registered" | Haven't added groups | Use `@Andy add group "Name"` in main |
 
 ### Log Location

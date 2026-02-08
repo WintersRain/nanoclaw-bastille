@@ -106,7 +106,7 @@ async function runTask(
       error = output.error || 'Unknown error';
     } else if (output.result) {
       if (output.result.outputType === 'message' && output.result.userMessage) {
-        await deps.sendMessage(task.channel_id, `${ASSISTANT_NAME}: ${output.result.userMessage}`);
+        await deps.sendMessage(task.channel_id, output.result.userMessage);
       }
       result = output.result.userMessage || output.result.internalLog || null;
     }

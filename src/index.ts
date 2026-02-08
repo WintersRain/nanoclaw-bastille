@@ -214,7 +214,7 @@ async function processGroupMessages(channelId: string): Promise<boolean> {
   saveState();
 
   if (response.outputType === 'message' && response.userMessage) {
-    await sendMessage(channelId, `${ASSISTANT_NAME}: ${response.userMessage}`);
+    await sendMessage(channelId, response.userMessage);
   }
 
   if (response.internalLog) {
@@ -382,7 +382,7 @@ function startIpcWatcher(): void {
                 ) {
                   await sendMessage(
                     data.channelId,
-                    `${ASSISTANT_NAME}: ${data.text}`,
+                    data.text,
                   );
                   logger.info(
                     { channelId: data.channelId, sourceGroup },
