@@ -93,4 +93,4 @@ MIT — Same as upstream.
 
 ## Thanks
 
-To [@gavrielc](https://github.com/gavrielc) for building NanoClaw. The "small enough to understand" philosophy is rare and valuable. This fork exists because the original was good enough to be worth customizing rather than replacing.
+To [@gavrielc](https://github.com/gavrielc) for building NanoClaw. The Lobster is on the loose.
