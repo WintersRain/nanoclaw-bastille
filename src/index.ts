@@ -10,6 +10,7 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   DISCORD_BOT_TOKEN,
+  GROUPS_DIR,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
@@ -47,6 +48,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { RegisteredGroup } from './types.js';
+import { collectImages, downloadAttachments } from './attachments.js';
 import { logger } from './logger.js';
 
 let client: Client;
@@ -194,13 +196,17 @@ async function processGroupMessages(channelId: string): Promise<boolean> {
   });
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
 
+  // Collect images from attachment markers for multimodal injection
+  const groupDir = path.join(GROUPS_DIR, group.folder);
+  const images = collectImages(missedMessages, groupDir);
+
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
     'Processing messages',
   );
 
   await setTyping(channelId, true);
-  const response = await runAgent(group, prompt, channelId);
+  const response = await runAgent(group, prompt, channelId, images);
   await setTyping(channelId, false);
 
   if (response === 'error') {
@@ -231,6 +237,7 @@ async function runAgent(
   group: RegisteredGroup,
   prompt: string,
   channelId: string,
+  images?: Array<{ name: string; mimeType: string; data: string }>,
 ): Promise<AgentResponse | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
@@ -269,6 +276,7 @@ async function runAgent(
         groupFolder: group.folder,
         channelId,
         isMain,
+        images: images && images.length > 0 ? images : undefined,
       },
       (proc, containerName) => queue.registerProcess(channelId, proc, containerName),
     );
@@ -732,7 +740,31 @@ async function connectDiscord(): Promise<void> {
           // Referenced message may be deleted
         }
       }
-      storeDiscordMessage(message, channelId, mentionsBot);
+      // Download attachments immediately (Discord CDN URLs expire)
+      const attachmentMeta: Array<{ name: string; contentType: string; relativePath: string }> = [];
+      if (message.attachments.size > 0) {
+        const groupDir = path.join(GROUPS_DIR, registeredGroups[channelId].folder);
+        const attachDir = path.join(groupDir, 'attachments', message.id);
+        fs.mkdirSync(attachDir, { recursive: true });
+        for (const [, attachment] of message.attachments) {
+          try {
+            const resp = await fetch(attachment.url);
+            if (resp.ok) {
+              const buffer = Buffer.from(await resp.arrayBuffer());
+              const safeName = (attachment.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+              fs.writeFileSync(path.join(attachDir, safeName), buffer);
+              attachmentMeta.push({
+                name: safeName,
+                contentType: attachment.contentType || 'application/octet-stream',
+                relativePath: `attachments/${message.id}/${safeName}`,
+              });
+            }
+          } catch (err) {
+            // Log but don't fail message storage
+          }
+        }
+      }
+      storeDiscordMessage(message, channelId, mentionsBot, attachmentMeta);
     }
   });
 

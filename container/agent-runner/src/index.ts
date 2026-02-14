@@ -18,6 +18,7 @@ interface ContainerInput {
   channelId: string;
   isMain: boolean;
   isScheduledTask?: boolean;
+  images?: Array<{ name: string; mimeType: string; data: string }>;
 }
 
 interface AgentResponse {
@@ -439,7 +440,17 @@ async function main(): Promise<void> {
   }
 
   // Add user message to contents
-  contents.push({ role: 'user', parts: [{ text: prompt }] });
+  // Build user message parts (text + optional images for multimodal)
+  const userParts: GeminiPart[] = [{ text: prompt }];
+  if (input.images && input.images.length > 0) {
+    for (const img of input.images) {
+      userParts.push({
+        inlineData: { mimeType: img.mimeType, data: img.data },
+      });
+      log(`Image attached to prompt: ${img.name} (${img.mimeType})`);
+    }
+  }
+  contents.push({ role: 'user', parts: userParts });
 
   let result: AgentResponse | null = null;
   let turns = 0;

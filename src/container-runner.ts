@@ -63,6 +63,7 @@ export interface ContainerInput {
   groupFolder: string;
   channelId: string;
   isMain: boolean;
+  images?: Array<{ name: string; mimeType: string; data: string }>;
 }
 
 export interface AgentResponse {
