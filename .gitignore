@@ -28,3 +28,10 @@ register-*.js
 .vscode/
 
 agents-sdk-docs
+
+# Test coverage
+coverage/
+
+# Group identity files (per-instance, not in repo)
+groups/*/CLAUDE.md
+groups/*/GEMINI.md
