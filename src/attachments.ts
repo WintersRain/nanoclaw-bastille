@@ -168,3 +168,42 @@ export function parseInjectionScanResponse(response: string): { safe: boolean; r
   // "SAFE" or anything else — fail open
   return { safe: true };
 }
+
+/**
+ * Scan an image for prompt injection using Gemini Flash.
+ * Uses a separate lightweight model call — no content moderation, only injection detection.
+ * Requires @google/genai SDK (available in the host process, not in containers).
+ */
+export async function scanImageWithGemini(
+  mimeType: string,
+  base64Data: string,
+  apiKey: string,
+  model: string = 'gemini-2.0-flash',
+): Promise<{ safe: boolean; reason?: string }> {
+  const { GoogleGenAI } = await import('@google/genai');
+  const ai = new GoogleGenAI({ apiKey });
+
+  const prompt = buildInjectionScanPrompt();
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: prompt },
+        { inlineData: { mimeType, data: base64Data } },
+      ],
+    }],
+  });
+
+  const text = response.text ?? '';
+  return parseInjectionScanResponse(text);
+}
+
+/**
+ * Create an injection scanner function bound to a specific API key and model.
+ * Returns a function matching the InjectionScanner type for use with collectImages.
+ */
+export function createInjectionScanner(apiKey: string, model?: string): InjectionScanner {
+  return (mimeType: string, base64Data: string) =>
+    scanImageWithGemini(mimeType, base64Data, apiKey, model);
+}

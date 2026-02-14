@@ -48,7 +48,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { RegisteredGroup } from './types.js';
-import { collectImages, downloadAttachments } from './attachments.js';
+import { collectImages, createInjectionScanner, downloadAttachments } from './attachments.js';
 import { logger } from './logger.js';
 
 let client: Client;
@@ -197,8 +197,11 @@ async function processGroupMessages(channelId: string): Promise<boolean> {
   const prompt = `<messages>\n${lines.join('\n')}\n</messages>`;
 
   // Collect images from attachment markers for multimodal injection
+  // Scan each image for prompt injection before passing to the agent
   const groupDir = path.join(GROUPS_DIR, group.folder);
-  const images = await collectImages(missedMessages, groupDir);
+  const geminiKey = process.env.GEMINI_API_KEY;
+  const scanner = geminiKey ? createInjectionScanner(geminiKey) : undefined;
+  const images = await collectImages(missedMessages, groupDir, undefined, undefined, scanner);
 
   logger.info(
     { group: group.name, messageCount: missedMessages.length, imageCount: images.length },
