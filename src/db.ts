@@ -209,6 +209,21 @@ export function setLastGroupSync(): void {
 }
 
 /**
+ * Build message content string with optional attachment metadata.
+ * Exported for testability — used by storeDiscordMessage.
+ */
+export function buildMessageContent(
+  content: string,
+  attachments?: Array<{ name: string; contentType: string; relativePath: string }>,
+): string {
+  if (!attachments || attachments.length === 0) return content;
+  const lines = attachments.map(
+    (a) => `[file: ${a.name} | ${a.contentType} | ${a.relativePath}]`,
+  );
+  return content ? `${content}\n${lines.join('\n')}` : lines.join('\n');
+}
+
+/**
  * Store a Discord message with full content.
  * Only call this for registered channels where message history is needed.
  */
@@ -216,8 +231,9 @@ export function storeDiscordMessage(
   msg: Message,
   channelId: string,
   mentionsBot: boolean,
+  attachments?: Array<{ name: string; contentType: string; relativePath: string }>,
 ): void {
-  const content = msg.content || '';
+  const content = buildMessageContent(msg.content || '', attachments);
   const timestamp = msg.createdAt.toISOString();
   const sender = msg.author.id;
   const senderName = msg.member?.displayName || msg.author.displayName || msg.author.username;
