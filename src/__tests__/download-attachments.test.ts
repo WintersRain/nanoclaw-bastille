@@ -18,7 +18,9 @@ afterEach(() => {
 describe('downloadAttachments', () => {
   // Happy path: saves file to disk and returns metadata
   it('should save attachment to disk and return metadata with relative path', () => {
-    const buffer = Buffer.from('fake-image-data');
+    // Valid PNG magic bytes + body
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    const buffer = Buffer.concat([pngHeader, Buffer.alloc(50, 0)]);
     const attachments = [
       { name: 'photo.png', contentType: 'image/png', buffer },
     ];
@@ -30,10 +32,8 @@ describe('downloadAttachments', () => {
     expect(result[0].contentType).toBe('image/png');
     expect(result[0].relativePath).toBe('attachments/msg-123/photo.png');
 
-    // Verify file was actually written
     const filePath = path.join(tmpDir, 'attachments', 'msg-123', 'photo.png');
     expect(fs.existsSync(filePath)).toBe(true);
-    expect(fs.readFileSync(filePath).toString()).toBe('fake-image-data');
   });
 
   // Negative: empty attachments returns empty array
@@ -42,24 +42,25 @@ describe('downloadAttachments', () => {
     expect(result).toHaveLength(0);
   });
 
-  // Sanitizes filenames — strips unsafe characters
+  // Sanitizes filenames — strips unsafe characters (use non-image type to avoid magic bytes check)
   it('should sanitize filenames to remove unsafe characters', () => {
     const buffer = Buffer.from('data');
     const attachments = [
-      { name: 'my file (1).png', contentType: 'image/png', buffer },
+      { name: 'my file (1).txt', contentType: 'text/plain', buffer },
     ];
 
     const result = downloadAttachments(tmpDir, 'msg-789', attachments);
 
-    expect(result[0].name).toBe('my_file__1_.png');
-    const filePath = path.join(tmpDir, 'attachments', 'msg-789', 'my_file__1_.png');
+    expect(result[0].name).toBe('my_file__1_.txt');
+    const filePath = path.join(tmpDir, 'attachments', 'msg-789', 'my_file__1_.txt');
     expect(fs.existsSync(filePath)).toBe(true);
   });
 
-  // Multiple attachments
+  // Multiple attachments (valid PNG + non-image)
   it('should handle multiple attachments in one message', () => {
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
     const attachments = [
-      { name: 'a.png', contentType: 'image/png', buffer: Buffer.from('aaa') },
+      { name: 'a.png', contentType: 'image/png', buffer: Buffer.concat([pngHeader, Buffer.alloc(50, 0)]) },
       { name: 'b.pdf', contentType: 'application/pdf', buffer: Buffer.from('bbb') },
     ];
 

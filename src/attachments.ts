@@ -64,6 +64,13 @@ export function downloadAttachments(
   const result: Array<{ name: string; contentType: string; relativePath: string }> = [];
 
   for (const att of attachments) {
+    // For image types, validate magic bytes to catch polyglots and MIME spoofing
+    if (IMAGE_TYPES.has(att.contentType)) {
+      if (!validateImageMagicBytes(att.buffer, att.contentType)) {
+        continue; // Skip spoofed files — don't save to disk
+      }
+    }
+
     const safeName = (att.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
     fs.writeFileSync(path.join(attachDir, safeName), att.buffer);
     result.push({
