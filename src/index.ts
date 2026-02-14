@@ -198,7 +198,7 @@ async function processGroupMessages(channelId: string): Promise<boolean> {
 
   // Collect images from attachment markers for multimodal injection
   const groupDir = path.join(GROUPS_DIR, group.folder);
-  const images = collectImages(missedMessages, groupDir);
+  const images = await collectImages(missedMessages, groupDir);
 
   logger.info(
     { group: group.name, messageCount: missedMessages.length, imageCount: images.length },

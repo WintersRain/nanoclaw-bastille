@@ -7,17 +7,21 @@ const DEFAULT_MAX_TOTAL_SIZE = 20 * 1024 * 1024;    // 20MB total
 
 const FILE_MARKER_REGEX = /\[file: (.+?) \| ([^\s|]+) \| (attachments\/[^\]]+)\]/g;
 
+export type InjectionScanner = (mimeType: string, base64Data: string) => Promise<{ safe: boolean; reason?: string }>;
+
 /**
  * Collect images from message content file markers.
  * Parses [file: name | mimeType | relativePath] markers, reads matching image files,
  * and returns base64-encoded data for Gemini multimodal injection.
+ * Optional scanner checks each image for prompt injection before including it.
  */
-export function collectImages(
+export async function collectImages(
   messages: Array<{ content: string }>,
   groupDir: string,
   maxPerImage: number = DEFAULT_MAX_IMAGE_SIZE,
   maxTotal: number = DEFAULT_MAX_TOTAL_SIZE,
-): Array<{ name: string; mimeType: string; data: string }> {
+  scanner?: InjectionScanner,
+): Promise<Array<{ name: string; mimeType: string; data: string }>> {
   const images: Array<{ name: string; mimeType: string; data: string }> = [];
   let totalSize = 0;
 
@@ -35,6 +39,17 @@ export function collectImages(
         if (stat.size > maxPerImage) continue;
         if (totalSize + stat.size > maxTotal) continue;
         const data = fs.readFileSync(hostPath).toString('base64');
+
+        // Run injection scan if scanner provided
+        if (scanner) {
+          try {
+            const scanResult = await scanner(mimeType, data);
+            if (!scanResult.safe) continue; // Drop injected images
+          } catch {
+            // Fail open — scanner errors don't block image delivery
+          }
+        }
+
         images.push({ name, mimeType, data });
         totalSize += stat.size;
       } catch {

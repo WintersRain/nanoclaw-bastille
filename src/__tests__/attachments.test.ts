@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe('collectImages', () => {
   // Happy path: extract image from message with file marker
-  it('should collect a PNG image referenced in message content', () => {
+  it('should collect a PNG image referenced in message content', async () => {
     // Create a fake image file
     const attachDir = path.join(tmpDir, 'attachments', '123');
     fs.mkdirSync(attachDir, { recursive: true });
@@ -28,7 +28,7 @@ describe('collectImages', () => {
       { content: 'Look at this\n[file: photo.png | image/png | attachments/123/photo.png]' },
     ];
 
-    const result = collectImages(messages, tmpDir);
+    const result = await collectImages(messages, tmpDir);
 
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('photo.png');
@@ -37,7 +37,7 @@ describe('collectImages', () => {
   });
 
   // Negative: non-image files are skipped
-  it('should skip non-image file types', () => {
+  it('should skip non-image file types', async () => {
     const attachDir = path.join(tmpDir, 'attachments', '456');
     fs.mkdirSync(attachDir, { recursive: true });
     fs.writeFileSync(path.join(attachDir, 'doc.pdf'), 'pdf-data');
@@ -46,24 +46,24 @@ describe('collectImages', () => {
       { content: '[file: doc.pdf | application/pdf | attachments/456/doc.pdf]' },
     ];
 
-    const result = collectImages(messages, tmpDir);
+    const result = await collectImages(messages, tmpDir);
 
     expect(result).toHaveLength(0);
   });
 
   // Negative: file that doesn't exist on disk is skipped
-  it('should skip files that do not exist on disk', () => {
+  it('should skip files that do not exist on disk', async () => {
     const messages = [
       { content: '[file: missing.png | image/png | attachments/789/missing.png]' },
     ];
 
-    const result = collectImages(messages, tmpDir);
+    const result = await collectImages(messages, tmpDir);
 
     expect(result).toHaveLength(0);
   });
 
   // Negative: oversized image is skipped
-  it('should skip images exceeding per-image size limit', () => {
+  it('should skip images exceeding per-image size limit', async () => {
     const attachDir = path.join(tmpDir, 'attachments', '100');
     fs.mkdirSync(attachDir, { recursive: true });
     // Create a file just over the limit (pass a small limit for testing)
@@ -74,13 +74,13 @@ describe('collectImages', () => {
       { content: '[file: big.png | image/png | attachments/100/big.png]' },
     ];
 
-    const result = collectImages(messages, tmpDir, 1024, 1024 * 1024);
+    const result = await collectImages(messages, tmpDir, 1024, 1024 * 1024);
 
     expect(result).toHaveLength(0);
   });
 
   // Negative: total size cap stops collection
-  it('should stop collecting when total size cap is reached', () => {
+  it('should stop collecting when total size cap is reached', async () => {
     const attachDir = path.join(tmpDir, 'attachments', '200');
     fs.mkdirSync(attachDir, { recursive: true });
     // Two 600-byte images, total cap 1000 — second should be skipped
@@ -91,20 +91,20 @@ describe('collectImages', () => {
       { content: '[file: a.png | image/png | attachments/200/a.png]\n[file: b.png | image/png | attachments/200/b.png]' },
     ];
 
-    const result = collectImages(messages, tmpDir, 1024, 1000);
+    const result = await collectImages(messages, tmpDir, 1024, 1000);
 
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('a.png');
   });
 
   // Negative: messages with no file markers return empty
-  it('should return empty array when no file markers exist', () => {
+  it('should return empty array when no file markers exist', async () => {
     const messages = [
       { content: 'Just a normal message' },
       { content: 'Another one' },
     ];
 
-    const result = collectImages(messages, tmpDir);
+    const result = await collectImages(messages, tmpDir);
 
     expect(result).toHaveLength(0);
   });
