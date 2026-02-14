@@ -75,3 +75,11 @@ export function downloadAttachments(
 
   return result;
 }
+
+/**
+ * Validate that a file is a safe image type for multimodal processing.
+ * Rejects non-image MIME types and SVG (which can contain embedded scripts).
+ */
+export function isImageSafeForProcessing(name: string, mimeType: string): boolean {
+  return IMAGE_TYPES.has(mimeType);
+}
