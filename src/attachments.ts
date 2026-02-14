@@ -83,3 +83,26 @@ export function downloadAttachments(
 export function isImageSafeForProcessing(name: string, mimeType: string): boolean {
   return IMAGE_TYPES.has(mimeType);
 }
+
+// Magic byte signatures for supported image types
+const MAGIC_BYTES: Record<string, (buf: Buffer) => boolean> = {
+  'image/png': (buf) => buf.length >= 8 &&
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47 &&
+    buf[4] === 0x0D && buf[5] === 0x0A && buf[6] === 0x1A && buf[7] === 0x0A,
+  'image/jpeg': (buf) => buf.length >= 3 &&
+    buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF,
+  'image/gif': (buf) => buf.length >= 6 &&
+    (buf.toString('ascii', 0, 6) === 'GIF87a' || buf.toString('ascii', 0, 6) === 'GIF89a'),
+  'image/webp': (buf) => buf.length >= 12 &&
+    buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP',
+};
+
+/**
+ * Validate that a file's magic bytes match its claimed MIME type.
+ * Catches polyglot files (e.g. ELF binary with .png extension) and MIME spoofing.
+ */
+export function validateImageMagicBytes(buffer: Buffer, mimeType: string): boolean {
+  const checker = MAGIC_BYTES[mimeType];
+  if (!checker) return false;
+  return checker(buffer);
+}
