@@ -45,3 +45,33 @@ export function collectImages(
 
   return images;
 }
+
+/**
+ * Save Discord attachment buffers to disk under groups/{folder}/attachments/{messageId}/.
+ * Returns metadata for each saved file (for DB storage via buildMessageContent).
+ * Downloads happen immediately because Discord CDN URLs expire.
+ */
+export function downloadAttachments(
+  groupDir: string,
+  messageId: string,
+  attachments: Array<{ name: string; contentType: string; buffer: Buffer }>,
+): Array<{ name: string; contentType: string; relativePath: string }> {
+  if (attachments.length === 0) return [];
+
+  const attachDir = path.join(groupDir, 'attachments', messageId);
+  fs.mkdirSync(attachDir, { recursive: true });
+
+  const result: Array<{ name: string; contentType: string; relativePath: string }> = [];
+
+  for (const att of attachments) {
+    const safeName = (att.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+    fs.writeFileSync(path.join(attachDir, safeName), att.buffer);
+    result.push({
+      name: safeName,
+      contentType: att.contentType,
+      relativePath: `attachments/${messageId}/${safeName}`,
+    });
+  }
+
+  return result;
+}
